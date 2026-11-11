@@ -104,6 +104,17 @@ export const ClusterRoleBindingModel: K8sModel = {
   namespaced: false,
 };
 
+export const RoleBindingModel: K8sModel = {
+  apiVersion: 'v1',
+  apiGroup: 'rbac.authorization.k8s.io',
+  kind: 'RoleBinding',
+  abbr: 'RB',
+  label: 'RoleBinding',
+  labelPlural: 'RoleBindings',
+  plural: 'rolebindings',
+  namespaced: true,
+};
+
 /** security.openshift.io v1 SecurityContextConstraints. */
 export const SecurityContextConstraintsModel: K8sModel = {
   apiVersion: 'v1',

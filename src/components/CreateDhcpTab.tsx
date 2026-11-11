@@ -1,6 +1,7 @@
 import {
   K8sResourceCommon,
   k8sCreate,
+  k8sPatch,
 } from '@openshift-console/dynamic-plugin-sdk';
 import { useTranslation } from 'react-i18next';
 import {
@@ -37,7 +38,7 @@ import {
 } from '@patternfly/react-core';
 import React, { FC, useCallback, useEffect, useMemo, useState } from 'react';
 
-import { ConfigMapModel, DeploymentModel, ServiceAccountModel, ClusterRoleBindingModel, ClusterRoleModel, SecurityContextConstraintsModel } from '../utils/k8s-resources';
+import { ConfigMapModel, DeploymentModel, ServiceAccountModel, RoleBindingModel, ClusterRoleModel, SecurityContextConstraintsModel } from '../utils/k8s-resources';
 import {
   DhcpServerConfig,
   NetworkAttachmentDefinitionKind,
@@ -269,6 +270,21 @@ const CreateDhcpTab: FC<CreateDhcpTabProps> = ({ nads, namespaces }) => {
         });
       } catch (sccErr: unknown) {
         if (!(sccErr as { code?: number })?.code || (sccErr as { code: number }).code !== 409) throw sccErr;
+        // An SCC left by an earlier release: bring it to the current, narrower
+        // definition (no privilege escalation, root only, no PVC volumes).
+        const want = sccData as Record<string, unknown>;
+        await k8sPatch({
+          model: SecurityContextConstraintsModel,
+          resource: { apiVersion: 'security.openshift.io/v1', kind: 'SecurityContextConstraints', metadata: { name: (want.metadata as { name: string }).name } },
+          data: [
+            { op: 'replace', path: '/allowPrivilegeEscalation', value: want.allowPrivilegeEscalation },
+            { op: 'replace', path: '/runAsUser', value: want.runAsUser },
+            { op: 'replace', path: '/volumes', value: want.volumes },
+            { op: 'add', path: '/seccompProfiles', value: want.seccompProfiles },
+            { op: 'replace', path: '/allowedCapabilities', value: want.allowedCapabilities },
+            { op: 'add', path: '/metadata/labels', value: (want.metadata as { labels: Record<string, string> }).labels },
+          ],
+        });
       }
 
       try {
@@ -295,11 +311,12 @@ const CreateDhcpTab: FC<CreateDhcpTabProps> = ({ nads, namespaces }) => {
         if ((saErr as { code?: number })?.code !== 409) throw saErr;
       }
 
-      dashboardLogger.info(LOG_ACTION, 'Ensuring ClusterRoleBinding for DHCP SCC', serverName.trim());
+      dashboardLogger.info(LOG_ACTION, 'Ensuring RoleBinding for DHCP SCC', serverName.trim());
       try {
         await k8sCreate({
-          model: ClusterRoleBindingModel,
+          model: RoleBindingModel,
           data: crbData as unknown as K8sResourceCommon,
+          ns: targetNamespace,
         });
       } catch (crbErr: unknown) {
         if ((crbErr as { code?: number })?.code !== 409) throw crbErr;

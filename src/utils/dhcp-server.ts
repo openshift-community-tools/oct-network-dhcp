@@ -89,9 +89,11 @@ export type DhcpServerInventoryItem = {
 /* ------------------------------------------------------------------ */
 
 const MANAGED_BY = 'oct-network-dhcp';
+/** Ownership label (as the storefront sets it), so the optional admission policy pack applies to these objects. */
+export const EXTENSION_LABEL = 'communitytools.io/extension';
+export const DHCP_SCC = 'oct-dhcp-netraw';
+export const DHCP_SCC_CLUSTERROLE = 'oct-dhcp-netraw-use';
 const DHCP_SERVER_IMAGE = 'quay.io/openshift-community-tools/oct-network-dhcp-server:1.0.1-ocp4.22';
-const DHCP_SCC_NAME = 'oct-dhcp-netraw';
-const DHCP_CLUSTERROLE_NAME = 'oct-dhcp-netraw-use';
 
 /* ------------------------------------------------------------------ */
 /*  IP validation helpers                                              */
@@ -281,6 +283,7 @@ export function buildDhcpConfigMap(opts: {
       namespace: opts.namespace,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
         'oct-dhcp/nad-name': opts.nadName,
         'oct-dhcp/nad-namespace': opts.nadNamespace,
       },
@@ -293,6 +296,10 @@ export function buildDhcpConfigMap(opts: {
 
 export function dhcpServiceAccountName(serverName: string): string {
   return `dhcp-${serverName}`.slice(0, 253);
+}
+
+export function dhcpRoleBindingName(serverName: string): string {
+  return `${dhcpServiceAccountName(serverName)}-scc`;
 }
 
 export function dhcpClusterRoleBindingName(serverName: string, namespace: string): string {
@@ -312,6 +319,7 @@ export function buildDhcpServiceAccount(opts: {
       namespace: opts.namespace,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
       },
     },
   };
@@ -322,13 +330,19 @@ export function buildDhcpScc(): Record<string, unknown> {
     apiVersion: 'security.openshift.io/v1',
     kind: 'SecurityContextConstraints',
     metadata: {
-      name: DHCP_SCC_NAME,
+      name: DHCP_SCC,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
       },
     },
+    // dnsmasq runs as root with only these three capabilities: it assigns the
+    // server address (ip addr add) and answers on UDP 67. Root keeps capabilities
+    // it is given directly, so privilege escalation (setuid binaries, file
+    // capabilities) is not needed. Running as non-root would need file
+    // capabilities in the image, which require privilege escalation.
     allowedCapabilities: ['NET_RAW', 'NET_BIND_SERVICE', 'NET_ADMIN'],
-    allowPrivilegeEscalation: true,
+    allowPrivilegeEscalation: false,
     allowPrivilegedContainer: false,
     allowHostDirVolumePlugin: false,
     allowHostIPC: false,
@@ -338,10 +352,12 @@ export function buildDhcpScc(): Record<string, unknown> {
     defaultAddCapabilities: null,
     requiredDropCapabilities: ['MKNOD'],
     fsGroup: { type: 'RunAsAny' },
-    runAsUser: { type: 'RunAsAny' },
+    runAsUser: { type: 'MustRunAs', uid: 0 },
     seLinuxContext: { type: 'MustRunAs' },
+    // Pods using this SCC run with the container runtime's default seccomp filter.
+    seccompProfiles: ['runtime/default'],
     supplementalGroups: { type: 'RunAsAny' },
-    volumes: ['configMap', 'emptyDir', 'projected', 'secret', 'downwardAPI', 'persistentVolumeClaim'],
+    volumes: ['configMap', 'emptyDir', 'projected', 'secret', 'downwardAPI'],
     users: [],
     groups: [],
   };
@@ -352,16 +368,17 @@ export function buildDhcpSccClusterRole(): Record<string, unknown> {
     apiVersion: 'rbac.authorization.k8s.io/v1',
     kind: 'ClusterRole',
     metadata: {
-      name: DHCP_CLUSTERROLE_NAME,
+      name: DHCP_SCC_CLUSTERROLE,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
       },
     },
     rules: [
       {
         apiGroups: ['security.openshift.io'],
         resources: ['securitycontextconstraints'],
-        resourceNames: [DHCP_SCC_NAME],
+        resourceNames: [DHCP_SCC],
         verbs: ['use'],
       },
     ],
@@ -373,20 +390,23 @@ export function buildDhcpSccRoleBinding(opts: {
   namespace: string;
 }): Record<string, unknown> {
   const saName = dhcpServiceAccountName(opts.name);
-  const crbName = dhcpClusterRoleBindingName(opts.name, opts.namespace);
+  // A RoleBinding in the server's namespace: the SCC can only be used by pods there.
+  // (Releases up to 1.1.x created a ClusterRoleBinding; delete removes both.)
   return {
     apiVersion: 'rbac.authorization.k8s.io/v1',
-    kind: 'ClusterRoleBinding',
+    kind: 'RoleBinding',
     metadata: {
-      name: crbName,
+      name: dhcpRoleBindingName(opts.name),
+      namespace: opts.namespace,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
       },
     },
     roleRef: {
       apiGroup: 'rbac.authorization.k8s.io',
       kind: 'ClusterRole',
-      name: DHCP_CLUSTERROLE_NAME,
+      name: DHCP_SCC_CLUSTERROLE,
     },
     subjects: [
       {
@@ -426,6 +446,7 @@ export function buildDhcpDeployment(opts: {
       namespace: opts.namespace,
       labels: {
         'app.kubernetes.io/managed-by': MANAGED_BY,
+        [EXTENSION_LABEL]: MANAGED_BY,
         'oct-dhcp/nad-name': opts.nadName,
         'oct-dhcp/nad-namespace': opts.nadNamespace,
       },
@@ -442,6 +463,7 @@ export function buildDhcpDeployment(opts: {
         metadata: {
           labels: {
             'app.kubernetes.io/managed-by': MANAGED_BY,
+            [EXTENSION_LABEL]: MANAGED_BY,
             'app.kubernetes.io/instance': opts.name,
           },
           annotations: {
@@ -471,7 +493,10 @@ export function buildDhcpDeployment(opts: {
               ],
               securityContext: {
                 runAsUser: 0,
+                allowPrivilegeEscalation: false,
+                seccompProfile: { type: 'RuntimeDefault' },
                 capabilities: {
+                  drop: ['ALL'],
                   add: ['NET_RAW', 'NET_BIND_SERVICE', 'NET_ADMIN'],
                 },
               },
